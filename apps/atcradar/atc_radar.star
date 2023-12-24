@@ -175,17 +175,52 @@ def get_bearing(lat_1, lng_1, lat_2, lng_2):
     return bearing
 
 def get_pixel_movement(deg):
-    # have bearning in degrees, now convert to cardinal point
+    # have bearning in degrees, now convert pixel movements equivalent
     compass_brackets = [[0, -1], [1, -1], [1, 0], [1, 1], [0, 1], [1, -1], [-1, 0], [-1, -1], [0, -1]]
     return compass_brackets[int(math.round(deg / 45))]
 
+def display_instructions():
+    ##############################################################################################################################################################################################################################
+    instructions_1 = "Get RapidAPI.com Key, click 'Apps', 'Add New App' find under 'Authorization'. Each green dot has flashing direction indicator. Brighter flashing means closer to ground. Yellow dot indicates your location."
+    instructions_2 = "Information Bar: When displayed, dots across bottom represents distance of nearest plane as percentage of search area. Green line means first 3rd of Update Frequency period, yellow the middle third, red the last third."
+    instructions_3 = "You can hide when the data is old, or update more or less frequently. Adjust to fit your budget and desire for current data."
+    return render.Root(
+        render.Column(
+            children = [
+                render.Marquee(
+                    width = 64,
+                    child = render.Text("ATC Radar", color = "#65d0e6", font = "5x8"),
+                ),
+                render.Marquee(
+                    width = 64,
+                    child = render.Text(instructions_1, color = "#f4a306"),
+                ),
+                render.Marquee(
+                    offset_start = len(instructions_1) * 5,
+                    width = 64,
+                    child = render.Text(instructions_2, color = "#f4a306"),
+                ),
+                render.Marquee(
+                    offset_start = (len(instructions_2) + len(instructions_1)) * 5,
+                    width = 64,
+                    child = render.Text(instructions_3, color = "#f4a306"),
+                ),
+            ],
+        ),
+        show_full_animation = True,
+    )
+
 def main(config):
+    show_instructions = config.bool("instructions", True)
+    if show_instructions:
+        return display_instructions()
+
     api_key = config.get("key")
 
     if (api_key == "") or (api_key == None):
         text = [
-            render.Text("Add"),
-            render.Text("API"),
+            render.Text("Add RapidAPI"),
+            render.Text("Flight Radar"),
             render.Text("Key"),
         ]
         return render.Root(
@@ -193,6 +228,8 @@ def main(config):
         )
 
     hide_when_nothing_to_display = config.bool("hide", True)
+    hide_data_older_than_seconds = int(config.get("hideold", 600))
+
     location = json.decode(config.get("location", DEFAULT_LOCATION))
     cache_tty = int(config.get("cache", 60))
 
@@ -209,16 +246,15 @@ def main(config):
     else:
         radar_height = 32
 
-    print(radar_height)
-    flights_cache_key = "_".join(["Flight", "Data", lat, lng])
+    flights_cache_key = "_".join(["All", "Flight", "Data", lat, lng])
     flights = get_flights_from_cache(flights_cache_key)
-
+    display_flights = []
     data_from_date = None
 
     if flights == None:
-        print("Contacting Flight Radar")
+        #print("Contacting Flight Radar")
         centrePoint = [float(lat), float(lng)]
-        boundingBox = get_bounding_box(centrePoint, search_distance)
+        boundingBox = get_bounding_box(centrePoint, 100)
 
         if TESTMODE:
             flights = [["32b96cff", "AAB100", 27.9, -88.5, 103.0, 5000.0, 552.0, "", "F-KMOB1", "B737", "N7883A", 1.69924097, "AUS", "MCO", "WN562", 0.0, 0.0, "SWA562", 0.0], ["32b96c79", "A8A4C7", 28.8316, -88.5084, 107.0, 33000.0, 535.0, "", "F-KMOB1", "B763", "N656UA", 1.699241512, "IAH", "GIG", "UA129", 0.0, 0.0, "UAL129", 0.0], ["32b9590f", "ADABFE", 28.723, -88.0323, 284.0, 30025.0, 413.0, "", "F-KMOB1", "A321", "N980JT", 1.699241512, "FLL", "SFO", "B6277", 0.0, 0.0, "JBU277", 0.0], ["32b9652c", "AD084E", 28.697, -87.9279, 284.0, 36025.0, 369.0, "", "F-KNEW1", "A20N", "N939NK", 1.699241512, "FLL", "SAT", "NK1738", 0.0, -64.0, "NKS1738", 0.0], ["32b96cff", "AAB100", 28.6329, -87.8272, 106.0, 39000.0, 550.0, "", "F-KNEW1", "B737", "N7883A", 1.699241512, "AUS", "MCO", "WN562", 0.0, 0.0, "SWA562", 0.0]]
@@ -245,31 +281,37 @@ def main(config):
         #print("Got flight data from cache")
         data_from_date = get_time_from_cache(flights_cache_key)
 
+    # calculate the area of the map we want to display
+    extremes = initialize_extremes(orig_lat, orig_lng)
+
+    #calculate the nearest flight
+    nearest_flight = 0
+
     if flights:
-        # calculate the area of the map we want to display
-        extremes = initialize_extremes(orig_lat, orig_lng)
-
-        #calculate the nearest flight
-        nearest_flight = 0
-
         for flight in flights:
             distance = get_distance(orig_lat, orig_lng, flight[2], flight[3])
-            nearest_flight = distance if nearest_flight == 0 else (distance if distance < nearest_flight else nearest_flight)
 
             #update extremes with each flight we want to plot
-            extremes = update_extremes(flight[2], flight[3], extremes)
+            if distance < search_distance:
+                nearest_flight = distance if nearest_flight == 0 else (distance if distance < nearest_flight else nearest_flight)
+                extremes = update_extremes(flight[2], flight[3], extremes)
+                display_flights.append(flight)
+
+    if display_flights:
+        #is it too old to display
+        if (time.now() - data_from_date).seconds > hide_data_older_than_seconds:
+            return []
 
         info_bar_length = int(WIDTH * min((nearest_flight / search_distance), 1))
         info_bar_color = get_stale_warning_color((time.now() - data_from_date).seconds, cache_tty)
-        return get_flight_radar(flights, extremes, orig_lat, orig_lng, info_bar_length, info_bar_color, radar_height)
-
+        return get_flight_radar(display_flights, extremes, orig_lat, orig_lng, info_bar_length, info_bar_color, radar_height)
     elif hide_when_nothing_to_display == True:
         return []
     else:
         text = [
-            render.Text("No"),
-            render.Text("Flights"),
-            render.Text("Nearby"),
+            render.Text("No Flights"),
+            render.Text("Within"),
+            render.Text("%s KM" % search_distance),
         ]
 
     return render.Root(
@@ -339,6 +381,9 @@ def update_extremes(lat1, lng1, extremes):
 def get_flight_radar(flights, extremes, home_lat, home_lng, info_bar_length, info_bar_color, radar_height):
     radar = []
     frames = []
+
+    if len(flights) == 0:
+        return []
 
     # Initialize variables from schema
     color = YELLOW_COLOR
@@ -509,7 +554,6 @@ def renderAnimation(frames, info_bar_length, info_bar_color):
                 render.Animation(
                     children = frames,
                 ),
-                #render.Text(content = "Hello", color = "#CCCCCC", font = "CG-pixel-4x5-mono"),
                 render.Box(width = info_bar_length, height = 1, color = info_bar_color),
             ],
         ),
@@ -588,6 +632,10 @@ def get_schema():
             value = "50",
         ),
         schema.Option(
+            display = "75km",
+            value = "75",
+        ),
+        schema.Option(
             display = "100km",
             value = "100",
         ),
@@ -596,47 +644,62 @@ def get_schema():
     return schema.Schema(
         version = "1",
         fields = [
-            schema.Dropdown(
-                id = "distance",
-                name = "Distance",
-                desc = "Airplane Search Radius",
-                icon = "rulerHorizontal",
-                default = options_distance[1].value,
-                options = options_distance,
-            ),
-            schema.Toggle(
-                id = "hide",
-                name = "Hide",
-                desc = "Hide app when no flights nearby?",
-                icon = "gear",
-                default = True,
-            ),
-            schema.Toggle(
-                id = "info_bar",
-                name = "Information Bar",
-                desc = "Show Information Bar",
-                icon = "gear",
-                default = True,
-            ),
-            schema.Dropdown(
-                id = "cache",
-                name = "Update Frequency",
-                desc = "Update data every:",
-                icon = "clock",
-                default = time_options[4].value,
-                options = time_options,
+            schema.Text(
+                id = "key",
+                name = "RapidAPI FlightRadar Key",
+                desc = "FlightRadar API key",
+                icon = "key",
             ),
             schema.Location(
                 id = "location",
                 name = "Location",
-                desc = "Your current location",
+                desc = "Your Current Location",
                 icon = "locationDot",
             ),
-            schema.Text(
-                id = "key",
-                name = "RapidAPI FlightRadar Key",
-                desc = "Flight Radar API key",
-                icon = "key",
+            schema.Dropdown(
+                id = "distance",
+                name = "Distance",
+                desc = "Airplane Search Radius",
+                icon = "jetFighter",
+                default = options_distance[1].value,
+                options = options_distance,
+            ),
+            schema.Dropdown(
+                id = "cache",
+                name = "Update Frequency",
+                desc = "",
+                icon = "clock",
+                default = time_options[4].value,
+                options = time_options,
+            ),
+            schema.Dropdown(
+                id = "hideold",
+                name = "Hide when data older than:",
+                desc = "",
+                icon = "gear",
+                default = time_options[6].value,
+                options = time_options,
+            ),
+            schema.Toggle(
+                id = "info_bar",
+                name = "Information Bar",
+                desc = "",
+                icon = "barsStaggered",
+                default = True,
+            ),
+            schema.Toggle(
+                id = "hide",
+                name = "Hide app when no flights nearby?",
+                desc = "",
+                icon = "gear",
+                default = True,
+            ),
+            schema.Toggle(
+                id = "instructions",
+                name = "Display Instructions",
+                desc = "",
+                icon = "book",  #"info",
+                default = False,
             ),
         ],
     )
